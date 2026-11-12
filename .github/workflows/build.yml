@@ -1,0 +1,130 @@
+name: WebAstra Cloud Builder
+
+on:
+  repository_dispatch:
+    types: [build-web-app]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Template Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Configure App & Decode Assets
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          python3 -c '
+          import os, json, base64, re
+
+          data = json.loads(os.environ["PAYLOAD"])
+          
+          app_name = data["appName"]
+          pkg_name = data["packageName"]
+          url = data["url"]
+          theme_color = data["themeColor"]
+          v_name = data["versionName"]
+          v_code = str(data["versionCode"])
+          features = data["features"]
+
+          # 1. Update strings.xml
+          with open("app/src/main/res/values/strings.xml", "w") as f:
+              f.write(f"""<resources>
+              <string name="app_name">{app_name}</string>
+              <string name="target_url">{url}</string>
+          </resources>""")
+
+          # 2. Update colors.xml
+          with open("app/src/main/res/values/colors.xml", "w") as f:
+              f.write(f"""<resources>
+              <color name="primary_theme">{theme_color}</color>
+          </resources>""")
+
+          # 3. Write Feature Flags JSON to assets
+          os.makedirs("app/src/main/assets", exist_ok=True)
+          with open("app/src/main/assets/config.json", "w") as f:
+              json.dump(features, f)
+
+          # 4. Decode App Icon if provided
+          if data.get("iconBase64"):
+              icon_bytes = base64.b64decode(data["iconBase64"])
+              for density in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
+                  os.makedirs(f"app/src/main/res/{density}", exist_ok=True)
+                  with open(f"app/src/main/res/{density}/ic_launcher.png", "wb") as img:
+                      img.write(icon_bytes)
+                  with open(f"app/src/main/res/{density}/ic_launcher_round.png", "wb") as img:
+                      img.write(icon_bytes)
+
+          # 5. Update namespace, applicationId & version in app/build.gradle.kts
+          with open("app/build.gradle.kts", "r") as f:
+              gradle = f.read()
+          gradle = re.sub(r"applicationId = \".*?\"", f"applicationId = \"{pkg_name}\"", gradle)
+          gradle = re.sub(r"versionCode = \d+", f"versionCode = {v_code}", gradle)
+          gradle = re.sub(r"versionName = \".*?\"", f"versionName = \"{v_name}\"", gradle)
+          with open("app/build.gradle.kts", "w") as f:
+              f.write(gradle)
+
+          # 6. Decode Keystore for Signed Builds
+          if data["buildType"] in ["SIGNED_APK", "SIGNED_AAB"] and data.get("keystoreBase64"):
+              with open("app/release.jks", "wb") as ks:
+                  ks.write(base64.b64decode(data["keystoreBase64"]))
+          '
+
+      - name: Build Debug APK
+        if: github.event.client_payload.buildType == 'DEBUG_APK'
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          mkdir -p output
+          cp app/build/outputs/apk/debug/app-debug.apk output/${{ github.event.client_payload.appName }}-debug.apk
+
+      - name: Build Signed Release APK
+        if: github.event.client_payload.buildType == 'SIGNED_APK'
+        env:
+          KEYSTORE_PASSWORD: ${{ github.event.client_payload.keystorePassword }}
+          KEY_ALIAS: ${{ github.event.client_payload.keyAlias }}
+          KEY_PASSWORD: ${{ github.event.client_payload.keyPassword }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/release.jks \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          mkdir -p output
+          cp app/build/outputs/apk/release/app-release.apk output/${{ github.event.client_payload.appName }}-signed.apk
+
+      - name: Build Signed Release AAB
+        if: github.event.client_payload.buildType == 'SIGNED_AAB'
+        env:
+          KEYSTORE_PASSWORD: ${{ github.event.client_payload.keystorePassword }}
+          KEY_ALIAS: ${{ github.event.client_payload.keyAlias }}
+          KEY_PASSWORD: ${{ github.event.client_payload.keyPassword }}
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/release.jks \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          mkdir -p output
+          cp app/build/outputs/bundle/release/app-release.aab output/${{ github.event.client_payload.appName }}-signed.aab
+
+      - name: Cleanup Sensitive Files
+        if: always()
+        run: rm -f app/release.jks
+
+      - name: Upload Built Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webastra-build-${{ github.event.client_payload.buildId }}
+          path: output/*
+          retention-days: 1
