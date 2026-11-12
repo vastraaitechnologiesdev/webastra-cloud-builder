@@ -1,1 +1,5 @@
+<resources>
+    <string name="app_name">WebAstra App</string>
+    <string name="target_url">https://example.com</string>
+</resources>
 
