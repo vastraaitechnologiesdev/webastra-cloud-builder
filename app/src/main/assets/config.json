@@ -1,1 +1,9 @@
+{
+  "pullToRefresh": true,
+  "loaderScreen": true,
+  "fullscreenMode": false,
+  "navigationButtons": true,
+  "externalLinksInBrowser": true,
+  "notificationSupport": false
+}
 
