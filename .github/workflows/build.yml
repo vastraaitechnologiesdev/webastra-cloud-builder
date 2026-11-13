@@ -22,7 +22,7 @@ jobs:
         env:
           RAW_DATA: ${{ github.event.client_payload.data }}
         run: |
-          python3 -c '
+          python3 - << 'EOF'
           import os, json, base64, re, subprocess
 
           data = json.loads(os.environ["RAW_DATA"])
@@ -37,25 +37,18 @@ jobs:
           build_type = data["buildType"]
           features = data["features"]
 
-          # Save buildId and safe filename for next steps
           safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", app_name) or "WebAstraApp"
           with open(os.environ["GITHUB_ENV"], "a") as env_file:
               env_file.write(f"BUILD_ID={build_id}\n")
               env_file.write(f"SAFE_NAME={safe_name}\n")
-              env_file.write(f"BUILD_TYPE={build_type}\n")
 
           # 1. Update strings.xml
           with open("app/src/main/res/values/strings.xml", "w") as f:
-              f.write(f"""<resources>
-              <string name="app_name">{app_name}</string>
-              <string name="target_url">{url}</string>
-          </resources>""")
+              f.write(f'<resources>\n    <string name="app_name">{app_name}</string>\n    <string name="target_url">{url}</string>\n</resources>')
 
           # 2. Update colors.xml
           with open("app/src/main/res/values/colors.xml", "w") as f:
-              f.write(f"""<resources>
-              <color name="primary_theme">{theme_color}</color>
-          </resources>""")
+              f.write(f'<resources>\n    <color name="primary_theme">{theme_color}</color>\n</resources>')
 
           # 3. Write Feature Flags JSON
           os.makedirs("app/src/main/assets", exist_ok=True)
@@ -75,9 +68,9 @@ jobs:
           # 5. Update app/build.gradle.kts
           with open("app/build.gradle.kts", "r") as f:
               gradle = f.read()
-          gradle = re.sub(r"applicationId = \".*?\"", f"applicationId = \"{pkg_name}\"", gradle)
-          gradle = re.sub(r"versionCode = \d+", f"versionCode = {v_code}", gradle)
-          gradle = re.sub(r"versionName = \".*?\"", f"versionName = \"{v_name}\"", gradle)
+          gradle = re.sub(r'applicationId = ".*?"', f'applicationId = "{pkg_name}"', gradle)
+          gradle = re.sub(r'versionCode = \d+', f'versionCode = {v_code}', gradle)
+          gradle = re.sub(r'versionName = ".*?"', f'versionName = "{v_name}"', gradle)
           with open("app/build.gradle.kts", "w") as f:
               f.write(gradle)
 
@@ -89,30 +82,34 @@ jobs:
               subprocess.run(["./gradlew", "assembleDebug"], check=True)
               os.rename("app/build/outputs/apk/debug/app-debug.apk", f"output/{safe_name}-debug.apk")
 
-          elif build_type == "SIGNED_APK":
-              with open("app/release.jks", "wb") as ks:
+          elif build_type in ["SIGNED_APK", "SIGNED_AAB"]:
+              jks_path = os.path.abspath("app/release.jks")
+              with open(jks_path, "wb") as ks:
                   ks.write(base64.b64decode(data["keystoreBase64"]))
-              subprocess.run([
-                  "./gradlew", "assembleRelease",
-                  f"-Pandroid.injected.signing.store.file={os.path.abspath(\"app/release.jks\")}",
-                  f"-Pandroid.injected.signing.store.password={data[\"keystorePassword\"]}",
-                  f"-Pandroid.injected.signing.key.alias={data[\"keyAlias\"]}",
-                  f"-Pandroid.injected.signing.key.password={data[\"keyPassword\"]}"
-              ], check=True)
-              os.rename("app/build/outputs/apk/release/app-release.apk", f"output/{safe_name}-signed.apk")
+              
+              ks_pass = data["keystorePassword"]
+              k_alias = data["keyAlias"]
+              k_pass = data["keyPassword"]
 
-          elif build_type == "SIGNED_AAB":
-              with open("app/release.jks", "wb") as ks:
-                  ks.write(base64.b64decode(data["keystoreBase64"]))
-              subprocess.run([
-                  "./gradlew", "bundleRelease",
-                  f"-Pandroid.injected.signing.store.file={os.path.abspath(\"app/release.jks\")}",
-                  f"-Pandroid.injected.signing.store.password={data[\"keystorePassword\"]}",
-                  f"-Pandroid.injected.signing.key.alias={data[\"keyAlias\"]}",
-                  f"-Pandroid.injected.signing.key.password={data[\"keyPassword\"]}"
-              ], check=True)
-              os.rename("app/build/outputs/bundle/release/app-release.aab", f"output/{safe_name}-signed.aab")
-          '
+              if build_type == "SIGNED_APK":
+                  subprocess.run([
+                      "./gradlew", "assembleRelease",
+                      f"-Pandroid.injected.signing.store.file={jks_path}",
+                      f"-Pandroid.injected.signing.store.password={ks_pass}",
+                      f"-Pandroid.injected.signing.key.alias={k_alias}",
+                      f"-Pandroid.injected.signing.key.password={k_pass}"
+                  ], check=True)
+                  os.rename("app/build/outputs/apk/release/app-release.apk", f"output/{safe_name}-signed.apk")
+              else:
+                  subprocess.run([
+                      "./gradlew", "bundleRelease",
+                      f"-Pandroid.injected.signing.store.file={jks_path}",
+                      f"-Pandroid.injected.signing.store.password={ks_pass}",
+                      f"-Pandroid.injected.signing.key.alias={k_alias}",
+                      f"-Pandroid.injected.signing.key.password={k_pass}"
+                  ], check=True)
+                  os.rename("app/build/outputs/bundle/release/app-release.aab", f"output/{safe_name}-signed.aab")
+          EOF
 
       - name: Cleanup Sensitive Files
         if: always()
