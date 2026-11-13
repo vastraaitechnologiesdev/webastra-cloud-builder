@@ -18,6 +18,11 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
       - name: Parse Config & Build App
         env:
           RAW_DATA: ${{ github.event.client_payload.data }}
@@ -43,6 +48,7 @@ jobs:
               env_file.write(f"SAFE_NAME={safe_name}\n")
 
           # 1. Update strings.xml
+          os.makedirs("app/src/main/res/values", exist_ok=True)
           with open("app/src/main/res/values/strings.xml", "w") as f:
               f.write(f'<resources>\n    <string name="app_name">{app_name}</string>\n    <string name="target_url">{url}</string>\n</resources>')
 
@@ -74,12 +80,11 @@ jobs:
           with open("app/build.gradle.kts", "w") as f:
               f.write(gradle)
 
-          # 6. Execute Gradle Build
-          subprocess.run(["chmod", "+x", "gradlew"], check=True)
+          # 6. Execute Gradle Build using system gradle
           os.makedirs("output", exist_ok=True)
 
           if build_type == "DEBUG_APK":
-              subprocess.run(["./gradlew", "assembleDebug"], check=True)
+              subprocess.run(["gradle", "assembleDebug"], check=True)
               os.rename("app/build/outputs/apk/debug/app-debug.apk", f"output/{safe_name}-debug.apk")
 
           elif build_type in ["SIGNED_APK", "SIGNED_AAB"]:
@@ -93,7 +98,7 @@ jobs:
 
               if build_type == "SIGNED_APK":
                   subprocess.run([
-                      "./gradlew", "assembleRelease",
+                      "gradle", "assembleRelease",
                       f"-Pandroid.injected.signing.store.file={jks_path}",
                       f"-Pandroid.injected.signing.store.password={ks_pass}",
                       f"-Pandroid.injected.signing.key.alias={k_alias}",
@@ -102,7 +107,7 @@ jobs:
                   os.rename("app/build/outputs/apk/release/app-release.apk", f"output/{safe_name}-signed.apk")
               else:
                   subprocess.run([
-                      "./gradlew", "bundleRelease",
+                      "gradle", "bundleRelease",
                       f"-Pandroid.injected.signing.store.file={jks_path}",
                       f"-Pandroid.injected.signing.store.password={ks_pass}",
                       f"-Pandroid.injected.signing.key.alias={k_alias}",
