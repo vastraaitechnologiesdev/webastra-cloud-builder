@@ -18,22 +18,31 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Configure App & Decode Assets
+      - name: Parse Config & Build App
         env:
-          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          RAW_DATA: ${{ github.event.client_payload.data }}
         run: |
           python3 -c '
-          import os, json, base64, re
+          import os, json, base64, re, subprocess
 
-          data = json.loads(os.environ["PAYLOAD"])
+          data = json.loads(os.environ["RAW_DATA"])
           
+          build_id = data["buildId"]
           app_name = data["appName"]
           pkg_name = data["packageName"]
           url = data["url"]
           theme_color = data["themeColor"]
           v_name = data["versionName"]
           v_code = str(data["versionCode"])
+          build_type = data["buildType"]
           features = data["features"]
+
+          # Save buildId and safe filename for next steps
+          safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", app_name) or "WebAstraApp"
+          with open(os.environ["GITHUB_ENV"], "a") as env_file:
+              env_file.write(f"BUILD_ID={build_id}\n")
+              env_file.write(f"SAFE_NAME={safe_name}\n")
+              env_file.write(f"BUILD_TYPE={build_type}\n")
 
           # 1. Update strings.xml
           with open("app/src/main/res/values/strings.xml", "w") as f:
@@ -48,12 +57,12 @@ jobs:
               <color name="primary_theme">{theme_color}</color>
           </resources>""")
 
-          # 3. Write Feature Flags JSON to assets
+          # 3. Write Feature Flags JSON
           os.makedirs("app/src/main/assets", exist_ok=True)
           with open("app/src/main/assets/config.json", "w") as f:
               json.dump(features, f)
 
-          # 4. Decode App Icon if provided
+          # 4. Decode App Icon
           if data.get("iconBase64"):
               icon_bytes = base64.b64decode(data["iconBase64"])
               for density in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
@@ -63,7 +72,7 @@ jobs:
                   with open(f"app/src/main/res/{density}/ic_launcher_round.png", "wb") as img:
                       img.write(icon_bytes)
 
-          # 5. Update namespace, applicationId & version in app/build.gradle.kts
+          # 5. Update app/build.gradle.kts
           with open("app/build.gradle.kts", "r") as f:
               gradle = f.read()
           gradle = re.sub(r"applicationId = \".*?\"", f"applicationId = \"{pkg_name}\"", gradle)
@@ -72,51 +81,38 @@ jobs:
           with open("app/build.gradle.kts", "w") as f:
               f.write(gradle)
 
-          # 6. Decode Keystore for Signed Builds
-          if data["buildType"] in ["SIGNED_APK", "SIGNED_AAB"] and data.get("keystoreBase64"):
+          # 6. Execute Gradle Build
+          subprocess.run(["chmod", "+x", "gradlew"], check=True)
+          os.makedirs("output", exist_ok=True)
+
+          if build_type == "DEBUG_APK":
+              subprocess.run(["./gradlew", "assembleDebug"], check=True)
+              os.rename("app/build/outputs/apk/debug/app-debug.apk", f"output/{safe_name}-debug.apk")
+
+          elif build_type == "SIGNED_APK":
               with open("app/release.jks", "wb") as ks:
                   ks.write(base64.b64decode(data["keystoreBase64"]))
+              subprocess.run([
+                  "./gradlew", "assembleRelease",
+                  f"-Pandroid.injected.signing.store.file={os.path.abspath(\"app/release.jks\")}",
+                  f"-Pandroid.injected.signing.store.password={data[\"keystorePassword\"]}",
+                  f"-Pandroid.injected.signing.key.alias={data[\"keyAlias\"]}",
+                  f"-Pandroid.injected.signing.key.password={data[\"keyPassword\"]}"
+              ], check=True)
+              os.rename("app/build/outputs/apk/release/app-release.apk", f"output/{safe_name}-signed.apk")
+
+          elif build_type == "SIGNED_AAB":
+              with open("app/release.jks", "wb") as ks:
+                  ks.write(base64.b64decode(data["keystoreBase64"]))
+              subprocess.run([
+                  "./gradlew", "bundleRelease",
+                  f"-Pandroid.injected.signing.store.file={os.path.abspath(\"app/release.jks\")}",
+                  f"-Pandroid.injected.signing.store.password={data[\"keystorePassword\"]}",
+                  f"-Pandroid.injected.signing.key.alias={data[\"keyAlias\"]}",
+                  f"-Pandroid.injected.signing.key.password={data[\"keyPassword\"]}"
+              ], check=True)
+              os.rename("app/build/outputs/bundle/release/app-release.aab", f"output/{safe_name}-signed.aab")
           '
-
-      - name: Build Debug APK
-        if: github.event.client_payload.buildType == 'DEBUG_APK'
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
-          mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/${{ github.event.client_payload.appName }}-debug.apk
-
-      - name: Build Signed Release APK
-        if: github.event.client_payload.buildType == 'SIGNED_APK'
-        env:
-          KEYSTORE_PASSWORD: ${{ github.event.client_payload.keystorePassword }}
-          KEY_ALIAS: ${{ github.event.client_payload.keyAlias }}
-          KEY_PASSWORD: ${{ github.event.client_payload.keyPassword }}
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=$(pwd)/app/release.jks \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-          mkdir -p output
-          cp app/build/outputs/apk/release/app-release.apk output/${{ github.event.client_payload.appName }}-signed.apk
-
-      - name: Build Signed Release AAB
-        if: github.event.client_payload.buildType == 'SIGNED_AAB'
-        env:
-          KEYSTORE_PASSWORD: ${{ github.event.client_payload.keystorePassword }}
-          KEY_ALIAS: ${{ github.event.client_payload.keyAlias }}
-          KEY_PASSWORD: ${{ github.event.client_payload.keyPassword }}
-        run: |
-          chmod +x gradlew
-          ./gradlew bundleRelease \
-            -Pandroid.injected.signing.store.file=$(pwd)/app/release.jks \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-          mkdir -p output
-          cp app/build/outputs/bundle/release/app-release.aab output/${{ github.event.client_payload.appName }}-signed.aab
 
       - name: Cleanup Sensitive Files
         if: always()
@@ -125,6 +121,6 @@ jobs:
       - name: Upload Built Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: webastra-build-${{ github.event.client_payload.buildId }}
+          name: webastra-build-${{ env.BUILD_ID }}
           path: output/*
           retention-days: 1
