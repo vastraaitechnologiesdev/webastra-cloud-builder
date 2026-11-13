@@ -28,7 +28,7 @@ jobs:
           RAW_DATA: ${{ github.event.client_payload.data }}
         run: |
           python3 - << 'EOF'
-          import os, json, base64, re, subprocess
+          import os, json, base64, re, subprocess, zlib, struct
 
           data = json.loads(os.environ["RAW_DATA"])
           
@@ -61,15 +61,23 @@ jobs:
           with open("app/src/main/assets/config.json", "w") as f:
               json.dump(features, f)
 
-          # 4. Decode App Icon
-          if data.get("iconBase64"):
-              icon_bytes = base64.b64decode(data["iconBase64"])
-              for density in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
-                  os.makedirs(f"app/src/main/res/{density}", exist_ok=True)
-                  with open(f"app/src/main/res/{density}/ic_launcher.png", "wb") as img:
-                      img.write(icon_bytes)
-                  with open(f"app/src/main/res/{density}/ic_launcher_round.png", "wb") as img:
-                      img.write(icon_bytes)
+          # 4. Decode App Icon or generate fallback solid-color PNG icon
+          def make_fallback_png(hex_color):
+              hex_color = hex_color.lstrip("#")
+              r, g, b = (int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)) if len(hex_color) == 6 else (13, 110, 253)
+              w, h = 96, 96
+              raw = b"".join(b"\x00" + bytes([r, g, b, 255]) * w for _ in range(h))
+              def chunk(tag, d):
+                  return struct.pack("!I", len(d)) + tag + d + struct.pack("!I", zlib.crc32(tag + d) & 0xffffffff)
+              return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+          icon_bytes = base64.b64decode(data["iconBase64"]) if data.get("iconBase64") else make_fallback_png(theme_color)
+          for density in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
+              os.makedirs(f"app/src/main/res/{density}", exist_ok=True)
+              with open(f"app/src/main/res/{density}/ic_launcher.png", "wb") as img:
+                  img.write(icon_bytes)
+              with open(f"app/src/main/res/{density}/ic_launcher_round.png", "wb") as img:
+                  img.write(icon_bytes)
 
           # 5. Update app/build.gradle.kts
           with open("app/build.gradle.kts", "r") as f:
@@ -80,7 +88,7 @@ jobs:
           with open("app/build.gradle.kts", "w") as f:
               f.write(gradle)
 
-          # 6. Execute Gradle Build using system gradle
+          # 6. Execute Gradle Build
           os.makedirs("output", exist_ok=True)
 
           if build_type == "DEBUG_APK":
